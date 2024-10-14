@@ -19,12 +19,6 @@ class DatasetGenerator():
     ENRICHED_WITH_GPT_PATH="04-enriched_with_gpt"
     EXECUTED_QUERIES_PATH="05-sparql_queries_executed"
 
-    sample_models = [
-        "Qwen/Qwen1.5-7B-Chat",
-        "openchat/openchat-3.6-8b-20240522",
-        "microsoft/Phi-3-medium-4k-instruct",
-    ]
-
     small_models = [
         "microsoft/Phi-3-mini-128k-instruct",
         "microsoft/Phi-3-medium-4k-instruct",
@@ -47,10 +41,10 @@ class DatasetGenerator():
     ]
     
     gpt_models = [ 
-            #"gpt-4o-2024-05-13",
+            "gpt-4o-2024-05-13",
             "gpt-4o-mini-2024-07-18",
-            #"gpt-4-turbo-2024-04-09",
-            #"gpt-3.5-turbo-0125"
+            "gpt-4-turbo-2024-04-09",
+            "gpt-3.5-turbo-0125"
     ]
 
 
@@ -58,9 +52,14 @@ class DatasetGenerator():
                  list_of_model_checkpoints,
                  path_to_ttl,
                  number_of_questions_per_model = 5,
-                 gpt_versions = None ):
+                 gpt_versions = None,
+                 feedback_dialog = True,
+                 max_rounds_of_feedback = 3
+        ):
         
         self.model_checkpoints = list_of_model_checkpoints
+        self.feedback_dialog = feedback_dialog
+        self.max_rounds_of_feedback = max_rounds_of_feedback
 
         self.graph_path = path_to_ttl
         with open(path_to_ttl, "r") as fp:
@@ -77,21 +76,23 @@ class DatasetGenerator():
         self.n_questions = number_of_questions_per_model
 
         self._result_dict = {
-            "meta": {},
+            "meta": { "models": self.model_checkpoints },
             "data": []
         }
 
 
-
     def __repr__(self):
         return f"""DatasetGenerator based on LLMs
--------------------------
+----------------------------------------------
 Model checkpoints:
 {self.model_checkpoints}
--------------------------
+----------------------------------------------
+Questions per Model:
+{self.n_questions}
+----------------------------------------------
 TTL file:
 {self.graph_path}
--------------------------
+----------------------------------------------
 GPT versions for data enrichment:
 {self.gpt_versions}
 """
@@ -103,6 +104,36 @@ GPT versions for data enrichment:
         self.generate_queries()
         self.generate_gpt_queries()
         self.execute_queries_and_store_results()
+
+    def _send_prompt_and_parse_questions(self, m, t, msg, missing_questions):
+        input_ids = t.apply_chat_template(msg, tokenize=True, add_generation_prompt=True, return_tensors="pt").to('cuda')
+        generated_ids = m.generate(input_ids, max_new_tokens=1024)
+
+        # Cutting off because generated_ids contains the input ids
+        generated_ids = [ generated_ids[0][len(input_ids[0]):] ]
+        
+        response = t.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        questions = response.split("\n")
+
+        parsed_questions = []
+        counter = 0
+        for q in questions:
+            counter += 1
+            if counter > missing_questions:
+                break
+            q = q.strip().replace("<|im_end|>", "")
+            if not q.endswith("?"):
+                counter -= 1
+            else: 
+                q = re.sub(r"^[^ ]*[0-9]+\.[^ ]* ", "", q)
+                parsed_questions.append(q)
+        print(parsed_questions, response)
+        return parsed_questions, response
+
+    def update_meta(self):
+        self._result_dict["meta"]["timestamp_unix"] = time.time()
+        self._result_dict["meta"]["timestamp_pretty"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
 
     def generate_questions(self):
 
@@ -130,16 +161,17 @@ GPT versions for data enrichment:
         print("  Generating questions")
         print("=================================")
         Path(DatasetGenerator.QUESTIONS_ONLY_PATH).mkdir(exist_ok=True)
-        self.prompt = f"""Generate {self.n_questions} questions that fit the following knowledge graph in ttl format:
-
-{self.graph_ttl}
-
-One question per line. No additional line breaks. No enumeration."""
 
         for cp in self.model_checkpoints:
             print("===============================================")
             print(f"            {cp}")
             print("===============================================")
+            prompt = f"""Generate {self.n_questions} questions that fit the following knowledge graph in ttl format:
+
+{self.graph_ttl}
+
+One question per line. No additional line breaks. No enumeration."""
+
             model = AutoModelForCausalLM.from_pretrained(
                 cp,
                 device_map="auto",
@@ -147,38 +179,38 @@ One question per line. No additional line breaks. No enumeration."""
                 trust_remote_code=True
             )
             tokenizer = AutoTokenizer.from_pretrained(cp)
-
             messages = [
-                { "role": "user", "content": self.prompt }
+                { "role": "user", "content": prompt }
             ]
 
-            input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to('cuda')
-            generated_ids = model.generate(input_ids, max_new_tokens=1024)
-
-            # Cutting off because generated_ids contains the input ids
-            generated_ids = [ generated_ids[0][len(input_ids[0]):] ]
+            questions = []
             
-            response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            questions = response.split("\n")
+            # Some LLMS (I'm looking at you gemma!) tend to provide less questions
+            # than we asked for. This is why we have to provide a feedback loop to
+            # allow those LLMs to fix their mistake
+            feedback_count = 0
+            missing_questions = self.n_questions
+            while len(questions) < self.n_questions:
+                new_questions, raw_response = self._send_prompt_and_parse_questions(model, tokenizer, messages, missing_questions)
+                print(new_questions, raw_response)
+                questions += [ { "question": q, "generated_by": cp, "feedback_count": feedback_count } for q in new_questions ]
 
-            counter = 0
-            for q in questions:
-                # This is necessary because OpenChat likes to generate waaaay more questions than it was told to
-                counter += 1
-                if counter > 5:
+                missing_questions = self.n_questions - len(questions)
+                messages.append( { "role": "assistant", "content": raw_response } )
+                messages.append( {"role": "user", "content": f"Please generate {missing_questions} more questions." } )
+
+                feedback_count += 1
+                
+
+                if not self.feedback_dialog or feedback_count > self.max_rounds_of_feedback:
                     break
-                if q.strip() != "":
-                    q = re.sub(r"^[0-9]+\. ", "", q)
-                    self._result_dict["data"].append({
-                        "question": q,
-                        "generated_by": cp
-                    })
+
+            self._result_dict["data"] += questions
 
         for idx in range(len(self._result_dict["data"])):
             self._result_dict["data"][idx]["index"] = idx+1
 
-        self._result_dict["meta"]["time_unix"] = time.time()
-        self._result_dict["meta"]["time_pretty"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.update_meta()
         with open(f"{DatasetGenerator.QUESTIONS_ONLY_PATH}/merged.json", "w") as fp:
             json.dump(self._result_dict, fp, indent=2)
 
@@ -239,8 +271,8 @@ Answer as short as possible. Give only facts, no full sentences.""")
                 response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
                 q["generated_answers"][cp] = response
 
-        self._result_dict["meta"]["time_unix"] = time.time()
-        self._result_dict["meta"]["time_pretty"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        self.update_meta()
         with open(f"{DatasetGenerator.QUESIONS_WITH_ANSWERS_PATH}/merged.json", "w") as fp:
             json.dump(self._result_dict, fp, indent=2)
 
@@ -303,8 +335,8 @@ Answer as short as possible. Give only facts, no full sentences.""")
                 response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
                 q["generated_queries"][cp] = response
 
-        self._result_dict["meta"]["time_unix"] = time.time()
-        self._result_dict["meta"]["time_pretty"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        self.update_meta()
         with open(f"{DatasetGenerator.QUESIONS_WITH_QUERIES_PATH}/merged.json", "w") as fp:
             json.dump(self._result_dict, fp, indent=2)
 
@@ -331,41 +363,44 @@ Answer as short as possible. Give only facts, no full sentences.""")
     # / /\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \/\ \
     # \ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `'\ `' /
     #  `--'`--'`--'`--'`--'`--'`--'`--'`--'`--'`--'`--'`--'`--'`--'`--'
-        print("==========================================")
-        print("  Generating reference queries via GPT")
-        print("==========================================")
-        Path(self.ENRICHED_WITH_GPT_PATH).mkdir(exist_ok=True)
 
-        prompt_template = string.Template("""
-        You are given the following knowledge graph in ttl format:
+        if self.gpt_versions:
+            print("==========================================")
+            print("  Generating reference queries via GPT")
+            print("==========================================")
+            Path(self.ENRICHED_WITH_GPT_PATH).mkdir(exist_ok=True)
 
-        ${graph_ttl}
 
-        Create a SPARQL query to answer the following question: ${question}
-        Give only the query. Do not generate any other text.
-        """)
+            prompt_template = string.Template("""
+            You are given the following knowledge graph in ttl format:
 
-        cl = OpenAI(
-            api_key=os.environ["OPENAI_API_KEY"]
-        )
+            ${graph_ttl}
 
-        for entry in self._result_dict["data"]:
-            question = entry["question"]
-            prompt = prompt_template.substitute(question=question, graph_ttl=graph_ttl)
-            for gpt_version in self.gpt_versions:
-                chat_completion = cl.chat.completions.create(
-                    messages = [
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    model=gpt_version
-                )
-                entry["generated_queries"][gpt_version] = chat_completion.choices[0].message.content
+            Create a SPARQL query to answer the following question: ${question}
+            Give only the query. Do not generate any other text.
+            """)
 
-        self._result_dict["meta"]["time_unix"] = time.time()
-        self._result_dict["meta"]["time_pretty"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            cl = OpenAI(
+                api_key=os.environ["OPENAI_API_KEY"]
+            )
+
+            for entry in self._result_dict["data"]:
+                question = entry["question"]
+                prompt = prompt_template.substitute(question=question, graph_ttl=graph_ttl)
+                for gpt_version in self.gpt_versions:
+                    chat_completion = cl.chat.completions.create(
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": prompt
+                            }
+                        ],
+                        model=gpt_version
+                    )
+                    entry["generated_queries"][gpt_version] = chat_completion.choices[0].message.content
+
+
+        self.update_meta()
         with open(f"{self.ENRICHED_WITH_GPT_PATH}/merged.json", "w") as fp:
             json.dump(self._result_dict, fp, indent=2)
 
@@ -424,8 +459,8 @@ Answer as short as possible. Give only facts, no full sentences.""")
                         "error": str(e)
                     }
 
-        self._result_dict["meta"]["time_unix"] = time.time()
-        self._result_dict["meta"]["time_pretty"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        self.update_meta()
         with open(f"{DatasetGenerator.EXECUTED_QUERIES_PATH}/merged.json", "w") as fp:
             json.dump(self._result_dict, fp, indent=2)
 
@@ -433,5 +468,6 @@ if __name__ == "__main__":
 
     graph_ttl = "ttl/org.ttl"
 
-    dg = DatasetGenerator(DatasetGenerator.sample_models, graph_ttl, gpt_versions = DatasetGenerator.gpt_models)
+    dg = DatasetGenerator(DatasetGenerator.small_models, graph_ttl, number_of_questions_per_model=10)
+    print(dg)
     dg.run()
