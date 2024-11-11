@@ -3,12 +3,12 @@ import sys
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import os
 import rdflib
-from openai import OpenAI
 import re
 import json
 import string
 import torch
 import time
+import yaml
 
 class DatasetGenerator():
 
@@ -48,6 +48,15 @@ class DatasetGenerator():
     ]
 
 
+    def restore_from_json(filepath):
+        with open(filepath, "r") as fp:
+            data = json.load(fp)
+
+        dg = DatasetGenerator(**data["meta"]["init_args"])
+        dg._result_dict["data"] = data["data"]
+        
+        return dg
+
     def __init__(self, 
                  list_of_model_checkpoints,
                  path_to_ttl,
@@ -56,6 +65,9 @@ class DatasetGenerator():
                  feedback_dialog = True,
                  max_rounds_of_feedback = 3
         ):
+
+        init_args = locals()
+        del(init_args["self"])
         
         self.model_checkpoints = list_of_model_checkpoints
         self.feedback_dialog = feedback_dialog
@@ -76,7 +88,10 @@ class DatasetGenerator():
         self.n_questions = number_of_questions_per_model
 
         self._result_dict = {
-            "meta": { "models": self.model_checkpoints },
+            "meta": { 
+                "kg": self.graph_ttl,
+                "init_args": init_args,
+             },
             "data": []
         }
 
@@ -84,7 +99,7 @@ class DatasetGenerator():
     def __repr__(self):
         return f"""DatasetGenerator based on LLMs
 ----------------------------------------------
-Model checkpoints:
+Model checkpoints: {len(self.model_checkpoints)}
 {self.model_checkpoints}
 ----------------------------------------------
 Questions per Model:
@@ -99,11 +114,23 @@ GPT versions for data enrichment:
 
 
     def run(self):
-        self.generate_questions()
-        self.generate_answers()
-        self.generate_queries()
-        self.generate_gpt_queries()
-        self.execute_queries_and_store_results()
+        if len(self._result_dict["data"]) == 0:
+            self.generate_questions()
+
+        ref_item = self._result_dict["data"][0]
+
+        if "generated_answers" not in ref_item.keys():
+            self.generate_answers()
+
+        if "generated_queries" not in ref_item.keys():
+            self.generate_queries()
+
+        if self.gpt_models is not None and self.gpt_models[0] not in ref_item["generated_queries"].keys():
+            self.generate_gpt_queries()
+
+        if "sparql_result_sets" not in ref_item.keys():
+            self.execute_queries_and_store_results()
+
 
     def _send_prompt_and_parse_questions(self, m, t, msg, missing_questions):
         input_ids = t.apply_chat_template(msg, tokenize=True, add_generation_prompt=True, return_tensors="pt").to('cuda')
@@ -127,7 +154,6 @@ GPT versions for data enrichment:
             else: 
                 q = re.sub(r"^[^ ]*[0-9]+\.[^ ]* ", "", q)
                 parsed_questions.append(q)
-        print(parsed_questions, response)
         return parsed_questions, response
 
     def update_meta(self):
@@ -178,7 +204,7 @@ One question per line. No additional line breaks. No enumeration."""
                 quantization_config = self.bnb_config,
                 trust_remote_code=True
             )
-            tokenizer = AutoTokenizer.from_pretrained(cp)
+            tokenizer = AutoTokenizer.from_pretrained(cp, trust_remote_code=True)
             messages = [
                 { "role": "user", "content": prompt }
             ]
@@ -192,7 +218,6 @@ One question per line. No additional line breaks. No enumeration."""
             missing_questions = self.n_questions
             while len(questions) < self.n_questions:
                 new_questions, raw_response = self._send_prompt_and_parse_questions(model, tokenizer, messages, missing_questions)
-                print(new_questions, raw_response)
                 questions += [ { "question": q, "generated_by": cp, "feedback_count": feedback_count } for q in new_questions ]
 
                 missing_questions = self.n_questions - len(questions)
@@ -212,6 +237,7 @@ One question per line. No additional line breaks. No enumeration."""
 
         self.update_meta()
         with open(f"{DatasetGenerator.QUESTIONS_ONLY_PATH}/merged.json", "w") as fp:
+            print(self._result_dict)
             json.dump(self._result_dict, fp, indent=2)
 
 
@@ -256,7 +282,7 @@ Answer as short as possible. Give only facts, no full sentences.""")
             print(f"            {cp}")
             print("===============================================")
             model = AutoModelForCausalLM.from_pretrained(cp, device_map="auto", quantization_config = self.bnb_config, trust_remote_code=True)
-            tokenizer = AutoTokenizer.from_pretrained(cp)
+            tokenizer = AutoTokenizer.from_pretrained(cp, trust_remote_code=True)
 
             for q in self._result_dict["data"]:
                 filled_prompt = self.prompt.substitute(graph_ttl=self.graph_ttl, question=q["question"])
@@ -369,6 +395,7 @@ Answer as short as possible. Give only facts, no full sentences.""")
             print("  Generating reference queries via GPT")
             print("==========================================")
             Path(self.ENRICHED_WITH_GPT_PATH).mkdir(exist_ok=True)
+            from openai import OpenAI
 
 
             prompt_template = string.Template("""
@@ -386,7 +413,7 @@ Answer as short as possible. Give only facts, no full sentences.""")
 
             for entry in self._result_dict["data"]:
                 question = entry["question"]
-                prompt = prompt_template.substitute(question=question, graph_ttl=graph_ttl)
+                prompt = prompt_template.substitute(question=question, graph_ttl=self.graph_ttl)
                 for gpt_version in self.gpt_versions:
                     chat_completion = cl.chat.completions.create(
                         messages = [
@@ -466,8 +493,26 @@ Answer as short as possible. Give only facts, no full sentences.""")
 
 if __name__ == "__main__":
 
-    graph_ttl = "ttl/org.ttl"
+    try:
+        conf_file = sys.argv[1]
+    except:
+        conf_file = "config.yaml"
 
-    dg = DatasetGenerator(DatasetGenerator.small_models, graph_ttl, number_of_questions_per_model=10)
+    with open(conf_file, "r") as fp:
+        conf_dict = yaml.load(fp, Loader=yaml.Loader)
+
+    if "run" in conf_dict.keys():
+        if not "gpt_versions" in conf_dict["run"].keys():
+            conf_dict["run"]["gpt_versions"] = []
+        dg = DatasetGenerator(
+            conf_dict["run"]["models"], 
+            conf_dict["run"]["ttl_path"], 
+            conf_dict["run"]["number_of_questions"], 
+            gpt_versions=conf_dict["run"]["gpt_versions"]
+        )
+    elif "resume" in conf_dict.keys():
+        dg = DatasetGenerator.restore_from_json(conf_dict["resume"]["load_file"])
+    else:
+        print("Malformed config file")
     print(dg)
     dg.run()
