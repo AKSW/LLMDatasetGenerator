@@ -1,0 +1,10 @@
+run:
+  models:
+  - microsoft/Phi-3-mini-128k-instruct
+  ttl_path: ./org.ttl
+  number_of_questions: 5
+  gpt_versions:
+  - gpt-4o-mini-2024-07-18
+
+# resume:
+#   load_file: 03-answers_and_queries/merged.json
