@@ -1,10 +1,10 @@
 run:
-  models:
+  models: # list of models to use
   - microsoft/Phi-3-mini-128k-instruct
-  ttl_path: ./org.ttl
+  ttl_path: ./org.ttl # path to the ttl file containing the KG to generate questions for
   number_of_questions: 5
-  gpt_versions:
+  gpt_versions: # list of GPT versions that should be prompted for Text2Sparql on the generated questions
   - gpt-4o-mini-2024-07-18
 
-# resume:
-#   load_file: 03-answers_and_queries/merged.json
+# resume: # uncomment this part if you want to resume from a old json
+#   load_file: 03-answers_and_queries/merged.json # name of the intermediary result
