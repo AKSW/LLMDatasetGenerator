@@ -237,7 +237,6 @@ One question per line. No additional line breaks. No enumeration."""
 
         self.update_meta()
         with open(f"{DatasetGenerator.QUESTIONS_ONLY_PATH}/merged.json", "w") as fp:
-            print(self._result_dict)
             json.dump(self._result_dict, fp, indent=2)
 
 
