@@ -15,11 +15,16 @@ Right now, there are two lists of models to choose from (feel free to customize)
 The first one contains models with less than ten billion parameters plus Microsoft's `Phi-3-Medium`.
 The second one contains model with up to 34 billion parameters as this was the physical limit that our hardware could handle.
 
-## TODO
+## Execution
 
-- Find GPU clusters that support models with more than 34B params
-- Include more models, create a curated list of well performing models
-- Use the output of the pipeline for fine tuning of a much smaller model and evaluate
-- Add a method to handle really large knowledge graphs (e.g. subsampling and splitting into multiple chunks that fit the context size)
-- Add a GUI for model selection and progress monitoring (low priority)
+Requirements:
+* python
+* transformers
+* capable GPU
+
+1. Edit the `config.yaml` to your liking
+2. run `python pipeline.py`
+
+The script generates folders for each step with the results. 
+
 
