@@ -10,12 +10,6 @@ We hope to open up new areas of research by providing this prototype and are loo
 
 ![Visualization of the Pipeline](./img/Queryfy-Process.drawio.png)
 
-## Chosen models
-
-Right now, there are two lists of models to choose from (feel free to customize): `small_models` and `medium_models`. 
-The first one contains models with less than ten billion parameters plus Microsoft's `Phi-3-Medium`.
-The second one contains model with up to 34 billion parameters as this was the physical limit that our hardware could handle.
-
 ## Execution
 
 Requirements:
@@ -27,5 +21,3 @@ Requirements:
 2. run `python pipeline.py`
 
 The script generates folders for each step with the results. 
-
-
