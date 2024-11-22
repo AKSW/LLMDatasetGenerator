@@ -8,7 +8,7 @@ This work was done for research purposes because by the time of this writing, th
 
 We hope to open up new areas of research by providing this prototype and are looking forward to contributions.
 
-![Visualization of the Pipeline](./img/pipeline.png)
+![Visualization of the Pipeline](./img/Queryfy-Process.drawio.png)
 
 ## Chosen models
 
