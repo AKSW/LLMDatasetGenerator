@@ -1,4 +1,5 @@
-# LLMDatasetGenerator
+Queryfy - Generating datasets for LLM finetuning from Knowledge Graphs
+---
 
 This tool takes a knowledge graph in ttl format as input and generates KGQA datasets from that.
 It does so by using multiple LLMs (see below) to generate appropriate questions for that specific knowledge graph, including the expected answers for reference and corresponding SPARQL queries.
